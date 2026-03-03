@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Breakout Master Demo</title>
+    <style>
+        body {
+            background: #111;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+
+        #gameCanvas {
+            border: 2px solid #fff;
+            background: #000;
+        }
+
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="info">Breakout Demo – the paddle at the bottom awaits your agent’s commands. The ball must break all
+        bricks.</div>
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Dimensions
+        const width = canvas.width;
+        const height = canvas.height;
+        const paddleWidth = 80;
+        const paddleHeight = 10;
+        const ballRadius = 6;
+
+        // Paddle object
+        const paddle = {
+            x: width / 2 - paddleWidth / 2,
+            y: height - paddleHeight - 10,
+            vx: 0,
+            speed: 6
+        };
+
+        // Ball object
+        const ball = {
+            x: width / 2,
+            y: height - 30,
+            vx: 3 * (Math.random() > 0.5 ? 1 : -1),
+            vy: -3,
+            baseSpeed: 3
+        };
+
+        // Brick settings
+        const brickRowCount = 5;
+        const brickColumnCount = 8;
+        const brickWidth = 60;
+        const brickHeight = 15;
+        const brickPadding = 10;
+        const brickOffsetTop = 40;
+        const brickOffsetLeft = 35;
+        // Generate bricks grid: 1 = exists, 0 = destroyed
+        const bricks = [];
+        for (let c = 0; c < brickColumnCount; c++) {
+            bricks[c] = [];
+            for (let r = 0; r < brickRowCount; r++) {
+                bricks[c][r] = { x: 0, y: 0, destroyed: false };
+            }
+        }
+
+        let score = 0;
+        let lives = 5;
+        let level = 1;
+
+        // Game State Flags
+        let gamePaused = false;
+
+        // WebSocket integration
+        let gameWs;
+        try {
+            gameWs = new WebSocket('ws://localhost:6789/game_breakout');
+            gameWs.onopen = () => {
+                console.log('Connected to Breakout WS server');
+            };
+            gameWs.onerror = (err) => {
+                console.error('Breakout WS error', err);
+            };
+            gameWs.onclose = () => {
+                console.log('Breakout WS connection closed');
+            };
+            gameWs.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'action') {
+                        if (msg.move === 'left') moveAgentPaddle('left');
+                        else if (msg.move === 'right') moveAgentPaddle('right');
+                        else if (msg.move === 'stop') moveAgentPaddle('stop');
+                    } else if (msg.type === 'ai' && msg.start) {
+                        startAgentAI();
+                    } else if (msg.type === 'command') {
+                        if (msg.action === 'pause' || msg.action === 'pause_game') {
+                            gamePaused = true;
+                            console.log('Game Paused via Command (' + msg.action + ')');
+                            sendGameState(); // Flush immediate state update
+                        } else if (msg.action === 'resume' || msg.action === 'resume_game') {
+                            gamePaused = false;
+                            console.log('Game Resumed via Command (' + msg.action + ')');
+                            sendGameState(); // Flush immediate state update
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error parsing message', e);
+                }
+            };
+        } catch (e) {
+            console.error('Failed to create Breakout WebSocket', e);
+        }
+
+        function sendGameState() {
+            if (!gameWs || gameWs.readyState !== WebSocket.OPEN) return;
+            const remainingBricks = bricks.reduce((sum, col) => sum + col.filter(b => !b.destroyed).length, 0);
+            const state = {
+                type: 'state',
+                ball: { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy },
+                paddleX: paddle.x,
+                paddleWidth: paddleWidth,
+                remainingBricks: remainingBricks,
+                score: score,
+                lives: lives,
+                level: level,
+                status: gamePaused ? 'paused' : 'active'
+            };
+            try {
+                gameWs.send(JSON.stringify(state));
+            } catch (e) {
+                console.error('Failed to send state', e);
+            }
+        }
+
+        // Agent control
+        let agentAuto = false;
+        function moveAgentPaddle(direction) {
+            if (direction === 'left') {
+                paddle.x -= paddle.speed;
+            } else if (direction === 'right') {
+                paddle.x += paddle.speed;
+            } else if (direction === 'stop') {
+                // do nothing
+            }
+            // Boundaries
+            if (paddle.x < 0) paddle.x = 0;
+            if (paddle.x + paddleWidth > width) paddle.x = width - paddleWidth;
+        }
+        function startAgentAI() {
+            agentAuto = true;
+        }
+        function updateAgentPaddle() {
+            if (agentAuto) {
+                // Move towards ball's x coordinate
+                const paddleCenter = paddle.x + paddleWidth / 2;
+                if (paddleCenter < ball.x - 4) paddle.x += paddle.speed;
+                else if (paddleCenter > ball.x + 4) paddle.x -= paddle.speed;
+                // Boundaries
+                if (paddle.x < 0) paddle.x = 0;
+                if (paddle.x + paddleWidth > width) paddle.x = width - paddleWidth;
+            }
+        }
+
+        function drawBricks() {
+            for (let c = 0; c < brickColumnCount; c++) {
+                for (let r = 0; r < brickRowCount; r++) {
+                    if (!bricks[c][r].destroyed) {
+                        const brickX = c * (brickWidth + brickPadding) + brickOffsetLeft;
+                        const brickY = r * (brickHeight + brickPadding) + brickOffsetTop;
+                        bricks[c][r].x = brickX;
+                        bricks[c][r].y = brickY;
+                        ctx.fillStyle = '#00aaff';
+                        ctx.fillRect(brickX, brickY, brickWidth, brickHeight);
+                    }
+                }
+            }
+        }
+
+        function collisionDetection() {
+            // Check bricks collision
+            for (let c = 0; c < brickColumnCount; c++) {
+                for (let r = 0; r < brickRowCount; r++) {
+                    const b = bricks[c][r];
+                    if (!b.destroyed) {
+                        if (
+                            ball.x > b.x &&
+                            ball.x < b.x + brickWidth &&
+                            ball.y > b.y &&
+                            ball.y < b.y + brickHeight
+                        ) {
+                            ball.vy = -ball.vy;
+                            b.destroyed = true;
+                            score += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, width, height);
+            // Draw paddle
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(paddle.x, paddle.y, paddleWidth, paddleHeight);
+            // Draw ball
+            ctx.beginPath();
+            ctx.arc(ball.x, ball.y, ballRadius, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+            ctx.closePath();
+            // Draw bricks
+            drawBricks();
+            // Score, Lives, Level
+            ctx.font = '16px Arial';
+            ctx.fillText('Score: ' + score, 8, 20);
+            ctx.fillText('Lives: ' + lives, width - 80, 20);
+            ctx.fillText('Level: ' + level, width / 2 - 30, 20);
+
+            // Draw pause text
+            if (gamePaused) {
+                ctx.font = '40px Arial';
+                ctx.fillStyle = '#ff0000';
+                ctx.fillText('PAUSED', width / 2 - 80, height / 2);
+            }
+        }
+
+        function update() {
+            if (gamePaused) {
+                // Game is paused, don't update physics. (sendGameState is handled proactively on receive and in rendering loop if desired)
+                return;
+            }
+
+            // Move ball
+            ball.x += ball.vx;
+            ball.y += ball.vy;
+            // Wall collisions
+            if (ball.x + ballRadius > width || ball.x - ballRadius < 0) ball.vx = -ball.vx;
+            if (ball.y - ballRadius < 0) ball.vy = -ball.vy;
+            // Paddle collision
+            if (
+                ball.y + ballRadius > paddle.y &&
+                ball.x > paddle.x &&
+                ball.x < paddle.x + paddleWidth
+            ) {
+                ball.vy = -ball.vy;
+                // Add a little horizontal change based on where it hit the paddle
+                const hitPos = (ball.x - (paddle.x + paddleWidth / 2)) / (paddleWidth / 2);
+                ball.vx = hitPos * 4;
+            }
+            // Bottom – reset or lose life
+            if (ball.y + ballRadius > height) {
+                lives -= 1;
+
+                if (lives <= 0) {
+                    // Game Over - Full Reset
+                    score = 0;
+                    level = 1;
+                    lives = 5;
+                    ball.baseSpeed = 3;
+                    for (let c = 0; c < brickColumnCount; c++) {
+                        for (let r = 0; r < brickRowCount; r++) {
+                            bricks[c][r].destroyed = false;
+                        }
+                    }
+                }
+
+                // Reset ball and paddle
+                ball.x = width / 2;
+                ball.y = height - 30;
+                ball.vx = ball.baseSpeed * (Math.random() > 0.5 ? 1 : -1);
+                ball.vy = -ball.baseSpeed;
+                paddle.x = width / 2 - paddleWidth / 2;
+                agentAuto = false;
+            }
+            // Brick collision detection
+            collisionDetection();
+            // Check if all bricks destroyed
+            const remaining = bricks.reduce((sum, col) => sum + col.filter(b => !b.destroyed).length, 0);
+            if (remaining === 0) {
+                // Level up
+                level += 1;
+                ball.baseSpeed += 0.5; // Increase base speed
+
+                // regenerate bricks and reset ball
+                for (let c = 0; c < brickColumnCount; c++) {
+                    for (let r = 0; r < brickRowCount; r++) {
+                        bricks[c][r].destroyed = false;
+                    }
+                }
+                ball.x = width / 2;
+                ball.y = height - 30;
+                ball.vx = ball.baseSpeed * (Math.random() > 0.5 ? 1 : -1);
+                ball.vy = -ball.baseSpeed;
+                paddle.x = width / 2 - paddleWidth / 2;
+                agentAuto = false;
+            }
+            // Update agent paddle if auto
+            updateAgentPaddle();
+        }
+
+        // Recording setup
+        let recording = true;
+        const replayData = [];
+        const startTime = Date.now();
+        function recordState() {
+            if (!recording) return;
+            const remaining = bricks.reduce((sum, col) => sum + col.filter(b => !b.destroyed).length, 0);
+            replayData.push({
+                t: Date.now() - startTime,
+                ball: { x: ball.x, y: ball.y },
+                paddleX: paddle.x,
+                remainingBricks: remaining,
+                score: score,
+                lives: lives,
+                level: level
+            });
+        }
+        function stopRecording() {
+            recording = false;
+            const duration = (Date.now() - startTime) / 1000;
+            const totalBricks = brickColumnCount * brickRowCount;
+            const bricksDestroyed = totalBricks - bricks.reduce((sum, col) => sum + col.filter(b => !b.destroyed).length, 0);
+            console.log('Breakout session metrics:', {
+                duration: duration,
+                bricksDestroyed: bricksDestroyed,
+                score: score
+            });
+            const blob = new Blob([JSON.stringify(replayData)], { type: 'application/json' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'breakout_replay.json';
+            a.click();
+        }
+        function gameLoop() {
+            if (!gamePaused) update();
+            draw();
+
+            // Limit spam by only repeatedly sending if not paused.
+            // When game becomes paused, an explicit sendGameState() is fired in the command handler.
+            if (!gamePaused) {
+                sendGameState();
+                recordState();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+        draw();
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+
+</html>
